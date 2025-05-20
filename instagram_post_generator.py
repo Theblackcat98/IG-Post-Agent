@@ -1,4 +1,5 @@
 import asyncio
+import os
 from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
 from autogen_agentchat.teams import DiGraphBuilder, GraphFlow
 from autogen_agentchat.messages import TextMessage
@@ -27,6 +28,26 @@ async def main():
         client_params["timeout"] = ollama_config["timeout"]
     
     model_client = OllamaChatCompletionClient(**client_params)
+
+    # 0. Topic Expander Agent: Takes a general topic and breaks it down into subtopics
+    topic_expander_agent = AssistantAgent(
+        name="TopicExpanderAgent",
+        model_client=model_client,
+        system_message='''You are a helpful AI assistant specialized in topic expansion.
+Given a general topic, your role is to break it down into 3-5 more specific subtopics.
+Output the subtopics as a numbered list.
+
+Example:
+Topic: Renewable Energy
+Output:
+1. Solar Power: Harnessing energy from the sun
+2. Wind Energy: Converting air movement into electricity 
+3. Hydroelectric Power: Using water flow to generate energy
+4. Geothermal Energy: Utilizing Earth's internal heat
+
+Your subtopics should be specific enough to generate dedicated content for each one.
+'''
+    )
 
     # 1. Planner Agent: Takes the topic and plans 3-5 slide themes.
     planner_agent = AssistantAgent(
@@ -122,99 +143,137 @@ Ensure the description and hashtags are under "--- DESCRIPTION ---".
         name="UserProxyAgent",
     )
 
-    # Build the graph
-    builder = DiGraphBuilder()
-    builder.add_node(planner_agent)
-    builder.add_node(slide_generator_agent)
-    builder.add_node(description_generator_agent)
-    builder.add_node(compiler_agent)
+    # The main topic from user input
+    main_topic = input("Enter the main topic for your Instagram posts: ")
+    if not main_topic:
+        main_topic = "The future of renewable energy" # Default topic
+        print(f"No topic entered, using default: {main_topic}")
 
-    # Define the flow: Planner -> SlideGenerator -> DescriptionGenerator -> Compiler
-    builder.add_edge(planner_agent, slide_generator_agent)
-    builder.add_edge(slide_generator_agent, description_generator_agent)
-    builder.add_edge(description_generator_agent, compiler_agent)
+    print("\nExpanding topic into subtopics...\n")
 
-    # Set the entry point
-    builder.set_entry_point(planner_agent)
-
-    graph = builder.build()
-
-    # Create the GraphFlow
-    flow = GraphFlow(
-        participants=builder.get_participants(),
-        graph=graph
-        # Optionally, add termination_condition, max_turns, etc.
+    # Set up the topic expansion flow
+    expansion_builder = DiGraphBuilder()
+    expansion_builder.add_node(topic_expander_agent)
+    expansion_builder.set_entry_point(topic_expander_agent)
+    expansion_graph = expansion_builder.build()
+    
+    expansion_flow = GraphFlow(
+        participants=expansion_builder.get_participants(),
+        graph=expansion_graph
     )
-
-    # Initiate the chat
-    topic = input("Enter the topic for your Instagram post: ")
-    if not topic:
-        topic = "The future of renewable energy" # Default topic
-        print(f"No topic entered, using default: {topic}")
-
-    print("\nGenerating Instagram post content...\n")
-
-    # The initial message to the graph should be to the entry point agent (planner_agent)
-    # By passing the topic string directly to flow.run(task=topic),
-    # GraphFlow will handle creating an initial message (typically UserMessage with source="user")
-    # and directing it to the entry point.
-    # initial_message = TextMessage(content=topic, source=user_proxy_agent.name, destination=planner_agent.name)
-
-    # Run the graph
-    # The `run` method needs a `task` argument which can be a BaseChatMessage or a string.
-    # Passing the topic string directly is the standard way for GraphFlow.
-    final_response_task_result = await flow.run(task=topic) # Pass the topic string directly
-
-    output_content = None
-    if final_response_task_result and final_response_task_result.messages:
-        # Iterate in reverse to find the last message from the compiler_agent
-        for message in reversed(final_response_task_result.messages):
-            if hasattr(message, 'source') and message.source == compiler_agent.name:
+    
+    # Run the topic expansion
+    expansion_result = await expansion_flow.run(task=main_topic)
+    
+    # Extract subtopics from the result
+    subtopics = []
+    if expansion_result and expansion_result.messages:
+        for message in reversed(expansion_result.messages):
+            if hasattr(message, 'source') and message.source == topic_expander_agent.name:
                 if hasattr(message, 'content') and message.content:
-                    output_content = str(message.content) # Ensure it's a string
+                    # Parse the numbered list from the content
+                    content_lines = message.content.strip().split('\n')
+                    for line in content_lines:
+                        if line.strip() and any(line.strip().startswith(str(i) + '.') for i in range(1, 10)):
+                            subtopic = line.strip().split('.', 1)[1].strip()
+                            subtopics.append(subtopic)
                     break
+    
+    # If no subtopics were extracted, use the main topic as the only subtopic
+    if not subtopics:
+        print("No subtopics could be extracted. Using main topic instead.")
+        subtopics = [main_topic]
+    
+    print(f"\nGenerated {len(subtopics)} subtopics:")
+    for i, subtopic in enumerate(subtopics, 1):
+        print(f"{i}. {subtopic}")
+    
+    # Create directory for output if it doesn't exist
+    output_dir = "instagram_posts"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Process each subtopic
+    for subtopic in subtopics:
+        print(f"\n\nGenerating Instagram post for subtopic: {subtopic}...\n")
         
-        if output_content:
-            print("\n--- INSTAGRAM POST CONTENT ---")
-            print(output_content)
-            print("--- END OF POST ---\n")
+        # Build the graph for this subtopic
+        content_builder = DiGraphBuilder()
+        content_builder.add_node(planner_agent)
+        content_builder.add_node(slide_generator_agent)
+        content_builder.add_node(description_generator_agent)
+        content_builder.add_node(compiler_agent)
 
-            # Save to file
-            try:
-                # Sanitize topic for filename
-                safe_topic_chars = []
-                for char_in_topic in topic:
-                    if char_in_topic.isalnum() or char_in_topic == ' ':
-                        safe_topic_chars.append(char_in_topic)
-                
-                safe_topic = "".join(safe_topic_chars).strip().replace(' ', '_').lower()
-                
-                if not safe_topic: # Handle case where topic becomes empty after sanitization
-                    safe_topic = "untitled_post"
-                filename = f"{safe_topic}_instagram_post.txt"
-                
-                with open(filename, "w", encoding="utf-8") as f:
-                    f.write(output_content)
-                print(f"Output also saved to: {filename}")
-            except Exception as e:
-                print(f"Error saving output to file: {e}")
+        # Define the flow: Planner -> SlideGenerator -> DescriptionGenerator -> Compiler
+        content_builder.add_edge(planner_agent, slide_generator_agent)
+        content_builder.add_edge(slide_generator_agent, description_generator_agent)
+        content_builder.add_edge(description_generator_agent, compiler_agent)
 
-        else: # No content found from compiler_agent or content was empty
-            print("Could not find valid content from the CompilerAgent in the chat history.")
-            print("Dumping all messages from TaskResult for debugging:")
-            for i, msg in enumerate(final_response_task_result.messages):
-                source_name = getattr(msg, 'source', 'N/A')
-                msg_type = type(msg).__name__
-                msg_content = getattr(msg, 'content', '<NO CONTENT ATTRIBUTE>')
-                print(f"Message {i}: Source='{source_name}', Type='{msg_type}', Content='{msg_content}'")
-                if msg_content == '<NO CONTENT ATTRIBUTE>':
-                    print(f"  Full Message Object: {msg}")
+        # Set the entry point
+        content_builder.set_entry_point(planner_agent)
+
+        content_graph = content_builder.build()
+
+        # Create the GraphFlow
+        content_flow = GraphFlow(
+            participants=content_builder.get_participants(),
+            graph=content_graph
+        )
+
+        # Run the content generation flow for this subtopic
+        final_response_task_result = await content_flow.run(task=subtopic)
+
+        output_content = None
+        if final_response_task_result and final_response_task_result.messages:
+            # Iterate in reverse to find the last message from the compiler_agent
+            for message in reversed(final_response_task_result.messages):
+                if hasattr(message, 'source') and message.source == compiler_agent.name:
+                    if hasattr(message, 'content') and message.content:
+                        output_content = str(message.content) # Ensure it's a string
+                        break
+            
+            if output_content:
+                print("\n--- INSTAGRAM POST CONTENT ---")
+                print(output_content)
+                print("--- END OF POST ---\n")
+
+                # Save to file
+                try:
+                    # Sanitize subtopic for filename
+                    safe_topic_chars = []
+                    for char_in_topic in subtopic:
+                        if char_in_topic.isalnum() or char_in_topic == ' ':
+                            safe_topic_chars.append(char_in_topic)
+                    
+                    safe_topic = "".join(safe_topic_chars).strip().replace(' ', '_').lower()
+                    
+                    if not safe_topic: # Handle case where topic becomes empty after sanitization
+                        safe_topic = "untitled_post"
+                    filename = f"{output_dir}/{safe_topic}_instagram_post.txt"
+                    
+                    with open(filename, "w", encoding="utf-8") as f:
+                        f.write(output_content)
+                    print(f"Output saved to: {filename}")
+                except Exception as e:
+                    print(f"Error saving output to file: {e}")
+
+            else: # No content found from compiler_agent or content was empty
+                print("Could not find valid content from the CompilerAgent in the chat history.")
+                print("Dumping all messages from TaskResult for debugging:")
+                for i, msg in enumerate(final_response_task_result.messages):
+                    source_name = getattr(msg, 'source', 'N/A')
+                    msg_type = type(msg).__name__
+                    msg_content = getattr(msg, 'content', '<NO CONTENT ATTRIBUTE>')
+                    print(f"Message {i}: Source='{source_name}', Type='{msg_type}', Content='{msg_content}'")
+                    if msg_content == '<NO CONTENT ATTRIBUTE>':
+                        print(f"  Full Message Object: {msg}")
 
 
-    else: # TaskResult is None or has no messages
-        print("No response or messages received from the graph execution.")
-        print("Full TaskResult object (if any):")
-        print(final_response_task_result)
+        else: # TaskResult is None or has no messages
+            print("No response or messages received from the graph execution.")
+            print("Full TaskResult object (if any):")
+            print(final_response_task_result)
+    
+    print(f"\nAll Instagram posts have been generated and saved to the '{output_dir}' directory.")
 
     # Close the model client
     await model_client.close()
