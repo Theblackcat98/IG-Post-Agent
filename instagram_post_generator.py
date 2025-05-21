@@ -244,7 +244,12 @@ Ensure the description and hashtags are under "--- DESCRIPTION ---".
                         if char_in_topic.isalnum() or char_in_topic == ' ':
                             safe_topic_chars.append(char_in_topic)
                     
-                    safe_topic = "".join(safe_topic_chars).strip().replace(' ', '_').lower()
+                    # Limit to 5 words maximum
+                    topic_text = "".join(safe_topic_chars).strip()
+                    words = topic_text.split()
+                    short_topic = " ".join(words[:5])  # Take only first 5 words
+                    
+                    safe_topic = short_topic.replace(' ', '_').lower()
                     
                     if not safe_topic: # Handle case where topic becomes empty after sanitization
                         safe_topic = "untitled_post"
